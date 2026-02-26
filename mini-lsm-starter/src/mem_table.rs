@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicUsize;
 
 use anyhow::Result;
 use bytes::Bytes;
+// cabbage: skipmap only requires an immutable reference when it comes to insertions
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
@@ -35,6 +36,7 @@ use crate::wal::Wal;
 /// An initial implementation of memtable is part of week 1, day 1. It will be incrementally implemented in other
 /// chapters of week 1 and week 2.
 pub struct MemTable {
+    // cabbage: SkipMap solves the problem of data races, Arc solves the problem of ownerships
     map: Arc<SkipMap<Bytes, Bytes>>,
     wal: Option<Wal>,
     id: usize,
@@ -52,8 +54,13 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 
 impl MemTable {
     /// Create a new mem-table.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        Self {
+            map: Arc::new(SkipMap::new()),
+            wal: None,
+            id: id,
+            approximate_size: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Create a new mem-table with WAL
@@ -86,8 +93,13 @@ impl MemTable {
     }
 
     /// Get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        // cabbage: owing to Borrow trait, &[u8] don't need to be converted into Bytes
+        if let Some(entry) = self.map.get(key) {
+            Some(entry.value().clone())
+        } else {
+            None
+        }
     }
 
     /// Put a key-value pair into the mem-table.
@@ -95,8 +107,23 @@ impl MemTable {
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let key_bytes = Bytes::copy_from_slice(key);
+        let value_bytes = Bytes::copy_from_slice(value);
+        let size = key_bytes.len() + value_bytes.len();
+        // cabbage: What is memory barrier?
+        // let's say we have two commands 1. data = 3;   2. ready = true;
+        // cpu nowadays may not execute our commands in sequence
+        // let's say our cpu has two cores1: core1 and core2
+        // core1 may choose to write ready = true in memory first
+        // then core2 may happily read the value of data because it sees ready = true
+        // however, core2 read the bad value instead of 3
+        // to solve this, we need memory barriers
+        // mutex is heavier than a simple memory barrier
+        self.approximate_size
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        self.map.insert(key_bytes, value_bytes);
+        Ok(())
     }
 
     /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.

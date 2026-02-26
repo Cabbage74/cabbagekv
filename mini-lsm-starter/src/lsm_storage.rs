@@ -32,7 +32,7 @@ use crate::compact::{
 };
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{self, MemTable};
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTable;
 
@@ -297,8 +297,27 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let guard = self.state.read();
+        if let Some(value) = guard.memtable.get(key) {
+            if value.is_empty() {
+                return Ok(None);
+            } else {
+                return Ok(Some(value));
+            }
+        }
+
+        for memtable in guard.imm_memtables.iter() {
+            if let Some(value) = memtable.get(key) {
+                if value.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Ok(Some(value));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -307,13 +326,31 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let size_after_put = {
+            let guard = self.state.read();
+            guard.memtable.put(key, value)?;
+            guard.memtable.approximate_size()
+        };
+        if size_after_put >= self.options.target_sst_size {
+            // cabbage: why we need both state_lock here?
+            // creating a memtable with wal can be slow
+            // we can put the slow part out of the rwlock
+            let state_lock = self.state_lock.lock();
+            // cabbage: why we need double check here?
+            // thread2 may freeze the new memtable created by thread1
+            let guard = self.state.read();
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.put(key, b"")
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -338,7 +375,15 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let new_memtable = Arc::new(MemTable::create(self.next_sst_id()));
+        let mut guard = self.state.write();
+        let mut new_state = guard.as_ref().clone();
+        new_state
+            .imm_memtables
+            .insert(0, new_state.memtable.clone());
+        new_state.memtable = new_memtable;
+        *guard = Arc::new(new_state);
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
