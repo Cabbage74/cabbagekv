@@ -15,6 +15,8 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use core::panic;
+
 use anyhow::Result;
 
 use crate::{
@@ -31,7 +33,15 @@ pub struct LsmIterator {
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        Ok(Self { inner: iter })
+        let mut lsm_iter = Self { inner: iter };
+        lsm_iter.move_to_non_delete()?;
+        Ok(lsm_iter)
+    }
+    fn move_to_non_delete(&mut self) -> Result<()> {
+        while self.inner.is_valid() && self.inner.value().is_empty() {
+            self.inner.next()?;
+        }
+        Ok(())
     }
 }
 
@@ -39,19 +49,21 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.inner.is_valid()
     }
 
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.inner.key().raw_ref()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.inner.value()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.inner.next()?;
+        self.move_to_non_delete()?;
+        Ok(())
     }
 }
 
@@ -79,18 +91,36 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
         Self: 'a;
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.has_errored && self.iter.is_valid()
     }
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if !self.is_valid() {
+            panic!("Cannot call key() on an errored iterator.");
+        }
+        self.iter.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if !self.is_valid() {
+            panic!("Cannot call value() on an errored iterator.");
+        }
+        self.iter.value()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.has_errored {
+            return Err(anyhow::anyhow!("Iterator has errored out previously."));
+        }
+        if !self.iter.is_valid() {
+            return Ok(());
+        }
+        match self.iter.next() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.has_errored = true;
+                Err(e)
+            }
+        }
     }
 }
