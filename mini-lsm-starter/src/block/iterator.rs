@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
+use bytes::Buf;
 
 /// Iterates on a block.
 pub struct BlockIterator {
@@ -48,44 +49,84 @@ impl BlockIterator {
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        unimplemented!()
+        let mut iter = Self::new(block);
+        iter.seek_to_first();
+        iter
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
-        unimplemented!()
+        let mut iter = Self::new(block);
+        iter.seek_to_key(key);
+        iter
     }
 
     /// Returns the key of the current entry.
-    pub fn key(&self) -> KeySlice {
-        unimplemented!()
+    pub fn key(&self) -> KeySlice<'_> {
+        self.key.as_key_slice()
     }
 
     /// Returns the value of the current entry.
     pub fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.block.data[self.value_range.0..self.value_range.1]
     }
 
     /// Returns true if the iterator is valid.
     /// Note: You may want to make use of `key`
     pub fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.key.is_empty()
     }
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        unimplemented!()
+        self.seek_to_index(0);
     }
 
     /// Move to the next key in the block.
     pub fn next(&mut self) {
-        unimplemented!()
+        self.seek_to_index(self.idx + 1);
     }
 
     /// Seek to the first key that >= `key`.
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
-        unimplemented!()
+        let mut left = 0;
+        let mut right = self.block.offsets.len();
+
+        while left < right {
+            let mid = (left + right) >> 1;
+            self.seek_to_index(mid);
+            if self.key() >= key {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        self.seek_to_index(left);
+    }
+
+    fn seek_to_index(&mut self, idx: usize) {
+        self.idx = idx;
+        if idx >= self.block.offsets.len() {
+            self.key.clear();
+            self.value_range = (0, 0);
+            return;
+        }
+
+        let offset = self.block.offsets[idx] as usize;
+        let mut cursor = &self.block.data[offset..];
+        let key_len = cursor.get_u16() as usize;
+        let key = &cursor[..key_len];
+        cursor.advance(key_len);
+        self.key.clear();
+        // cabbage: deepcopy key here
+        self.key.append(key);
+
+        let val_len = cursor.get_u16() as usize;
+
+        let val_offset_start = offset + 2 + key_len + 2;
+        // cabbage: val is still zerocopied
+        self.value_range = (val_offset_start, val_offset_start + val_len);
     }
 }
