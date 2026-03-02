@@ -19,9 +19,7 @@ pub(crate) mod bloom;
 mod builder;
 mod iterator;
 
-use core::num;
 use std::fs::File;
-use std::mem::offset_of;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,7 +28,7 @@ pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
 
-use crate::block::{self, Block};
+use crate::block::Block;
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
