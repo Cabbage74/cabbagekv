@@ -47,28 +47,36 @@ impl BlockBuilder {
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        assert!(!key.is_empty(), "key must not be empty");
+        let is_first_key = self.is_empty();
 
-        // cabbage: key_len(2) + key + val_len(2) + val
-        let entry_size = 2 + key.len() + 2 + value.len();
-        // cabbage: old data + new data + old offsets + new offsets + num of elements
-        // u16 = 2 * u8
-        let estimated_size = self.data.len() + entry_size + (self.offsets.len() + 1) * 2 + 2;
+        if is_first_key {
+            self.first_key = key.to_key_vec();
+        }
 
-        if estimated_size > self.block_size && !self.is_empty() {
+        let overlap = if is_first_key {
+            0
+        } else {
+            Self::compute_overlap(self.first_key.raw_ref(), key.raw_ref())
+        };
+
+        let rest_key_len = key.raw_ref().len() - overlap;
+
+        let current_size = self.data.len() + self.offsets.len() * 2 + 2;
+
+        let data_space_needed = 2 + 2 + rest_key_len + 2 + value.len();
+        let space_needed = data_space_needed + 2;
+
+        if current_size + space_needed > self.block_size && !self.is_empty() {
             return false;
         }
 
         self.offsets.push(self.data.len() as u16);
 
-        self.data.put_u16(key.len() as u16);
-        self.data.put_slice(key.raw_ref());
+        self.data.put_u16(overlap as u16);
+        self.data.put_u16(rest_key_len as u16);
+        self.data.put_slice(&key.raw_ref()[overlap..]);
         self.data.put_u16(value.len() as u16);
         self.data.put_slice(value);
-
-        if self.first_key.is_empty() {
-            self.first_key = key.to_key_vec();
-        }
 
         true
     }
@@ -84,5 +92,19 @@ impl BlockBuilder {
             data: self.data,
             offsets: self.offsets,
         }
+    }
+
+    fn compute_overlap(first_key: &[u8], key: &[u8]) -> usize {
+        let mut i = 0;
+        loop {
+            if i >= first_key.len() || i >= key.len() {
+                break;
+            }
+            if first_key[i] != key[i] {
+                break;
+            }
+            i += 1;
+        }
+        i
     }
 }

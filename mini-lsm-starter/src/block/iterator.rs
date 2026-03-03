@@ -38,12 +38,20 @@ pub struct BlockIterator {
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
+        let mut first_key = KeyVec::new();
+        if !block.offsets.is_empty() {
+            let mut data = &block.data[..];
+            let _overlap_len = data.get_u16();
+            let rest_key_len = data.get_u16() as usize;
+            first_key.append(&data[..rest_key_len]);
+        }
+
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
+            first_key,
         }
     }
 
@@ -116,17 +124,30 @@ impl BlockIterator {
 
         let offset = self.block.offsets[idx] as usize;
         let mut cursor = &self.block.data[offset..];
-        let key_len = cursor.get_u16() as usize;
-        let key = &cursor[..key_len];
-        cursor.advance(key_len);
-        self.key.clear();
-        // cabbage: deepcopy key here
-        self.key.append(key);
 
+        // 1. 读取 overlap_len 和 rest_key_len
+        let overlap_len = cursor.get_u16() as usize;
+        let rest_key_len = cursor.get_u16() as usize;
+
+        // 2. 获取 rest_key，并让游标向前推进
+        let rest_key = &cursor[..rest_key_len];
+        cursor.advance(rest_key_len);
+
+        // 3. 拼图还原：清空旧 key，拼上前缀，再拼上 rest_key
+        self.key.clear();
+        // cabbage: deepcopy first part of the key here
+        self.key.append(&self.first_key.raw_ref()[..overlap_len]);
+        // cabbage: deepcopy the rest part of the key
+        self.key.append(rest_key);
+
+        // 4. 读取 value_len
         let val_len = cursor.get_u16() as usize;
 
-        let val_offset_start = offset + 2 + key_len + 2;
-        // cabbage: val is still zerocopied
+        // 5. 计算 value 的绝对起始位置
+        // 现在的偏移量是：overlap(2) + rest_key_len(2) + 实际的 rest_key_len + val_len(2)
+        let val_offset_start = offset + 2 + 2 + rest_key_len + 2;
+
+        // cabbage: val is still zerocopied!
         self.value_range = (val_offset_start, val_offset_start + val_len);
     }
 }

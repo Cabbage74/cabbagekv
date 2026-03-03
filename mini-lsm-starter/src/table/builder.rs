@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::bloom::Bloom;
 use super::{BlockMeta, SsTable};
 use crate::{
     block::BlockBuilder,
@@ -27,6 +28,7 @@ use crate::{
     lsm_storage::BlockCache,
     table::FileObject,
 };
+use farmhash::fingerprint32;
 
 use bytes::{BufMut, Bytes};
 
@@ -38,6 +40,7 @@ pub struct SsTableBuilder {
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    key_hashes: Vec<u32>,
 }
 
 impl SsTableBuilder {
@@ -50,6 +53,7 @@ impl SsTableBuilder {
             data: Vec::with_capacity(256 * 1024 * 1024),
             meta: Vec::new(),
             block_size,
+            key_hashes: Vec::new(),
         }
     }
 
@@ -58,6 +62,8 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
+        self.key_hashes.push(fingerprint32(key.raw_ref()));
+
         if self.first_key.is_empty() {
             self.first_key.extend(key.raw_ref());
         }
@@ -119,6 +125,12 @@ impl SsTableBuilder {
 
         self.data.put_u32(meta_offset as u32);
 
+        let bloom_offset = self.data.len();
+        let bits_per_key = 10;
+        let bloom = Bloom::build_from_key_hashes(&self.key_hashes, bits_per_key);
+        bloom.encode(&mut self.data);
+        self.data.put_u32(bloom_offset as u32);
+
         let file = FileObject::create(path.as_ref(), self.data)?;
 
         Ok(SsTable {
@@ -129,7 +141,7 @@ impl SsTableBuilder {
             block_meta: self.meta,
             block_meta_offset: meta_offset,
             block_cache,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }

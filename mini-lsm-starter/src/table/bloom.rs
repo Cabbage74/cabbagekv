@@ -93,7 +93,15 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for &h in keys {
+            let mut h = h;
+            let delta = h.rotate_left(15);
+            for _ in 0..k {
+                let bit_pos = (h % nbits as u32) as usize;
+                filter[bit_pos / 8] |= 1 << (bit_pos % 8);
+                h = h.wrapping_add(delta);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -102,16 +110,20 @@ impl Bloom {
     }
 
     /// Check if a bloom filter may contain some data
-    pub fn may_contain(&self, h: u32) -> bool {
-        if self.k > 30 {
+    pub fn may_contain(&self, mut h: u32) -> bool {
+        if self.k > 30 || self.k == 0 {
             // potential new encoding for short bloom filters
             true
         } else {
             let nbits = self.filter.bit_len();
             let delta = h.rotate_left(15);
-
-            // TODO: probe the bloom filter
-
+            for _ in 0..self.k {
+                let bit_pos = (h % nbits as u32) as usize;
+                if self.filter[bit_pos / 8] & (1 << (bit_pos % 8)) == 0 {
+                    return false;
+                }
+                h = h.wrapping_add(delta);
+            }
             true
         }
     }

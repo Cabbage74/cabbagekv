@@ -39,6 +39,7 @@ use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTableIterator;
 use crate::table::{SsTable, SsTableBuilder};
+use farmhash::fingerprint32;
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -350,11 +351,19 @@ impl LsmStorageInner {
             }
         }
 
+        let key_hash = fingerprint32(key);
+
         for sst_id in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables.get(sst_id).unwrap().clone();
 
             if key < table.first_key().raw_ref() || key > table.last_key().raw_ref() {
                 continue;
+            }
+
+            if let Some(bloom) = &table.bloom {
+                if !bloom.may_contain(key_hash) {
+                    continue;
+                }
             }
 
             let iter = SsTableIterator::create_and_seek_to_key(
